@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from pathlib import Path
 
-from .alerts import JsonLineAlertSink
+from .alerts import CompositeAlertSink, JsonLineAlertSink, WebhookAlertSink
 from .config import DEFAULT_CHUNK_SIZE, DEFAULT_FATAL_SEVERITY
 from .engine import AlertEngine
 from .ingestion import normalize_chunk, read_log_chunks
@@ -48,6 +49,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Threshold for fatal errors per bundle in <1 hour",
     )
     parser.add_argument(
+        "--webhook-url",
+        type=str,
+        default=os.getenv("ALERT_WEBHOOK_URL", "").strip(),
+        help="Optional HTTP webhook URL for alert delivery",
+    )
+    parser.add_argument(
+        "--webhook-timeout",
+        type=float,
+        default=5.0,
+        help="Webhook request timeout in seconds",
+    )
+    parser.add_argument(
+        "--webhook-retries",
+        type=int,
+        default=2,
+        help="Webhook retries after first attempt",
+    )
+    parser.add_argument(
+        "--webhook-backoff",
+        type=float,
+        default=0.5,
+        help="Base exponential backoff in seconds",
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
@@ -69,7 +94,19 @@ def main() -> int:
     if not args.input.exists():
         raise FileNotFoundError(f"Input file does not exist: {args.input}")
 
-    sink = JsonLineAlertSink(args.output)
+    sinks = [JsonLineAlertSink(args.output)]
+    webhook_url = args.webhook_url.strip()
+    if webhook_url:
+        sinks.append(
+            WebhookAlertSink(
+                url=webhook_url,
+                timeout_seconds=args.webhook_timeout,
+                max_retries=args.webhook_retries,
+                backoff_seconds=args.webhook_backoff,
+            )
+        )
+
+    sink = CompositeAlertSink(sinks=sinks)
     rules = [
         GlobalFatalBurstRule(threshold=args.global_threshold),
         BundleFatalBurstRule(threshold=args.bundle_threshold),
@@ -98,6 +135,8 @@ def main() -> int:
     logging.info("Rows with valid date: %s", summary.rows_with_valid_date)
     logging.info("Alerts emitted: %s", summary.alerts_emitted)
     logging.info("Alerts written to: %s", args.output)
+    if webhook_url:
+        logging.info("Webhook delivery enabled: %s", webhook_url)
 
     return 0
 
